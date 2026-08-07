@@ -269,13 +269,34 @@
     renderAuth();
   }
 
-  async function loadData() {
+  async function loadData(userOverride = null) {
     showLoading("Chargement des coffres…");
     try {
+      // L'utilisateur est capturé au début du chargement pour éviter qu'un
+      // événement d'authentification simultané remplace state.user par null.
+      let currentUser = userOverride && userOverride.id ? userOverride : state.user;
+
+      if (!currentUser?.id) {
+        const { data: userData, error: userError } = await state.client.auth.getUser();
+        if (userError) throw userError;
+        currentUser = userData?.user || null;
+      }
+
+      if (!currentUser?.id) {
+        state.session = null;
+        state.user = null;
+        state.profile = null;
+        renderAuth();
+        return;
+      }
+
+      state.user = currentUser;
+      const userId = currentUser.id;
+
       const profileResult = await state.client
         .from("profiles")
         .select("*")
-        .eq("id", state.user.id)
+        .eq("id", userId)
         .maybeSingle();
 
       if (profileResult.error) throw profileResult.error;
@@ -344,7 +365,7 @@
         </section>
       </main>
     `;
-    document.getElementById("retry").addEventListener("click", loadData);
+    document.getElementById("retry").addEventListener("click", () => loadData());
     document.getElementById("logout-error").addEventListener("click", logout);
   }
 
@@ -1223,14 +1244,22 @@
     state.session = data.session;
     state.user = data.session?.user || null;
 
-    state.client.auth.onAuthStateChange(async (_event, session) => {
+    state.client.auth.onAuthStateChange((event, session) => {
       state.session = session;
       state.user = session?.user || null;
-      if (state.user) await loadData();
-      else renderAuth();
+
+      // Le callback Supabase reste synchrone. Le chargement est décalé afin
+      // d'éviter les courses entre INITIAL_SESSION, SIGNED_IN et getSession().
+      if (session?.user) {
+        const authenticatedUser = session.user;
+        window.setTimeout(() => loadData(authenticatedUser), 0);
+      } else if (event === "SIGNED_OUT") {
+        state.profile = null;
+        renderAuth();
+      }
     });
 
-    if (state.user) await loadData();
+    if (state.user) await loadData(state.user);
     else renderAuth();
   }
 
