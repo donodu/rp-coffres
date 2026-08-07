@@ -50,6 +50,11 @@
     movements: [],
     profiles: [],
     adminAccess: false,
+    siteSettings: { approval_required: true, site_enabled: true, maintenance_message: null },
+    adminPrivate: [],
+    loginEvents: [],
+    adminAudit: [],
+    adminFilter: "",
     historyFilters: { search: "", type: "", vault: "", member: "" }
   };
 
@@ -60,6 +65,7 @@
     history: "☷",
     members: "♟",
     settings: "⚙",
+    admin: "✦",
     shared: "◈",
     lock: "◆"
   };
@@ -87,6 +93,21 @@
 
   function isCommanderSupreme() {
     return isTechnicalAdmin() || level() === 120;
+  }
+
+  function accessStatus(profile = state.profile) {
+    return profile?.access_status || "approved";
+  }
+
+  function isApproved(profile = state.profile) {
+    return accessStatus(profile) === "approved" && profile?.is_active !== false;
+  }
+
+  function accessBadge(profile) {
+    const status = accessStatus(profile);
+    if (status === "approved") return '<span class="badge badge-green">Autorisé</span>';
+    if (status === "blocked") return '<span class="badge badge-red">Bloqué</span>';
+    return '<span class="badge badge-yellow">En attente</span>';
   }
 
   function canMove(vault) {
@@ -273,7 +294,49 @@
     state.user = null;
     state.profile = null;
     state.adminAccess = false;
+    state.adminPrivate = [];
+    state.loginEvents = [];
+    state.adminAudit = [];
     renderAuth();
+  }
+
+  async function recordLoginEventOnce(userId) {
+    if (!userId) return;
+    const key = `sp_login_recorded_${userId}`;
+    if (sessionStorage.getItem(key) === "1") return;
+    try {
+      const { error } = await state.client.rpc("record_login_event", {
+        p_user_agent: navigator.userAgent || null,
+        p_page_url: window.location.href || null
+      });
+      if (!error) sessionStorage.setItem(key, "1");
+      else console.warn("Journal de connexion indisponible :", error);
+    } catch (error) {
+      console.warn("Journal de connexion indisponible :", error);
+    }
+  }
+
+  async function loadAdminData() {
+    if (!isTechnicalAdmin()) {
+      state.adminPrivate = [];
+      state.loginEvents = [];
+      state.adminAudit = [];
+      return;
+    }
+
+    const [privateResult, loginResult, auditResult] = await Promise.all([
+      state.client.from("admin_user_private").select("*").order("updated_at", { ascending: false }),
+      state.client.from("login_events").select("*").order("logged_at", { ascending: false }).limit(1000),
+      state.client.from("admin_audit").select("*").order("created_at", { ascending: false }).limit(1000)
+    ]);
+
+    for (const result of [privateResult, loginResult, auditResult]) {
+      if (result.error) throw result.error;
+    }
+
+    state.adminPrivate = privateResult.data || [];
+    state.loginEvents = loginResult.data || [];
+    state.adminAudit = auditResult.data || [];
   }
 
   async function loadData(userOverride = null) {
@@ -299,6 +362,7 @@
 
       state.user = currentUser;
       const userId = currentUser.id;
+      await recordLoginEventOnce(userId);
 
       const profileResult = await state.client
         .from("profiles")
@@ -319,6 +383,18 @@
         state.adminAccess = false;
       } else {
         state.adminAccess = adminResult.data === true;
+      }
+
+      const settingsResult = await state.client
+        .from("site_settings")
+        .select("*")
+        .eq("id", 1)
+        .maybeSingle();
+      if (!settingsResult.error && settingsResult.data) state.siteSettings = settingsResult.data;
+
+      if (!isTechnicalAdmin() && (!isApproved(state.profile) || state.siteSettings.site_enabled === false)) {
+        renderAccessGate();
+        return;
       }
 
       const topThree = isTopThree();
@@ -353,6 +429,8 @@
         if (["history", "personal"].includes(state.page)) state.page = "dashboard";
       }
 
+      await loadAdminData();
+
       if (state.selectedVaultId && !byId(state.vaults, state.selectedVaultId)) {
         state.selectedVaultId = null;
       }
@@ -365,6 +443,35 @@
     } finally {
       hideLoading();
     }
+  }
+
+  function renderAccessGate() {
+    const status = accessStatus(state.profile);
+    const maintenance = state.siteSettings.site_enabled === false;
+    const blocked = status === "blocked" || state.profile?.is_active === false;
+    const title = maintenance ? "Centre temporairement fermé" : blocked ? "Accès bloqué" : "Accès en attente";
+    const text = maintenance
+      ? (state.siteSettings.maintenance_message || "Le centre de commandement est temporairement indisponible.")
+      : blocked
+        ? "Ton compte a été bloqué par l'administrateur. Contacte la direction si tu penses qu'il s'agit d'une erreur."
+        : "Ta connexion Discord a bien été enregistrée. Un administrateur doit maintenant autoriser ton compte avant l'accès aux coffres.";
+
+    app.innerHTML = `
+      <main class="auth-shell">
+        <section class="auth-card access-gate-card">
+          <img class="auth-logo" src="assets/logo.png" alt="Logo Silver Phoenix" />
+          <div class="eyebrow">CONTRÔLE D'ACCÈS</div>
+          <h1>${esc(title)}</h1>
+          <p>${esc(text)}</p>
+          <div class="access-identity">${avatar(state.profile)}<div><strong>${esc(displayName(state.profile))}</strong><span>${esc(state.profile?.username || "")}</span></div></div>
+          ${!maintenance && !blocked ? '<span class="badge badge-yellow">VALIDATION ADMIN REQUISE</span>' : ''}
+          <button id="gate-logout" class="btn btn-secondary btn-block" type="button" style="margin-top:14px">Déconnexion</button>
+          <button id="gate-admin" class="btn btn-primary btn-block" type="button" style="margin-top:8px">Accès administrateur technique</button>
+        </section>
+      </main>
+    `;
+    document.getElementById("gate-logout")?.addEventListener("click", logout);
+    document.getElementById("gate-admin")?.addEventListener("click", openAdminClaimModal);
   }
 
   function renderError(error) {
@@ -395,6 +502,7 @@
       personal: ["Coffres personnels", "Section réservée aux trois plus hauts grades"],
       history: ["Historique", "Journal sécurisé des opérations"],
       members: ["Membres", "Grades et accès Silver Phoenix"],
+      admin: ["Administration", "Contrôle complet du site et des accès"],
       settings: ["Paramètres", "Informations et sécurité du site"]
     };
     return { title: map[state.page]?.[0] || "Silver Phoenix", subtitle: map[state.page]?.[1] || "" };
@@ -425,6 +533,7 @@
             <div class="nav-divider"></div>
             ${navButton("history", ICONS.history, "Historique", true)}
             ${navButton("members", ICONS.members, "Membres")}
+            ${isTechnicalAdmin() ? navButton("admin", ICONS.admin, "Administration") : ""}
             ${navButton("settings", ICONS.settings, "Paramètres")}
           </nav>
           <div class="sidebar-user">
@@ -485,6 +594,7 @@
       case "personal": return isTopThree() ? renderVaults("personal") : renderForbidden();
       case "history": return isTopThree() ? renderHistory() : renderForbidden();
       case "members": return renderMembers();
+      case "admin": return isTechnicalAdmin() ? renderAdmin() : renderForbidden();
       case "settings": return renderSettings();
       default: return renderDashboard();
     }
@@ -843,7 +953,7 @@
         </section>
         <section class="card" style="grid-column:1/-1">
           <div class="card-head">
-            <div><h3>Panel administrateur protégé</h3><p>Nommer ou remplacer le Commandeur suprême</p></div>
+            <div><h3>Administration technique</h3><p>Accès, membres, connexions, contenu et sécurité</p></div>
             <span class="badge badge-red">Mot de passe requis</span>
           </div>
           <div class="card-body">
@@ -863,12 +973,321 @@
               ${esc(displayName(state.profiles.find((profile) => profile.rank === "Commandeur suprême")) || "Aucun membre nommé")}
             </div>
             <div class="form-actions" style="justify-content:flex-start">
-              <button id="open-admin-panel" class="btn btn-primary" type="button">Ouvrir le panel administrateur</button>
+              <button id="open-admin-panel" class="btn btn-primary" type="button">Ouvrir l'administration complète</button>
             </div>
           </div>
         </section>
       </div>
     `;
+  }
+
+  function adminPrivateFor(userId) {
+    return state.adminPrivate.find((row) => row.user_id === userId) || null;
+  }
+
+  function latestLoginFor(userId) {
+    return state.loginEvents.find((row) => row.user_id === userId) || null;
+  }
+
+  function adminAuditLabel(row) {
+    const labels = {
+      commander_transfer: "Transfert du Commandeur suprême",
+      access_status: "Modification d'accès",
+      rank_change: "Modification de grade",
+      note_update: "Note administrateur",
+      site_settings: "Paramètres du site",
+      admin_password_changed: "Mot de passe admin modifié",
+      admin_owner_transfer: "Transfert de l'administration",
+      connection_logs_cleanup: "Nettoyage des connexions"
+    };
+    return labels[row.action] || row.action || "Action admin";
+  }
+
+  function adminFilteredProfiles() {
+    const q = state.adminFilter.trim().toLowerCase();
+    if (!q) return state.profiles;
+    return state.profiles.filter((profile) => {
+      const priv = adminPrivateFor(profile.id);
+      return [displayName(profile), profile.username, profile.discord_id, profile.rank, profile.access_status, priv?.email]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(q));
+    });
+  }
+
+  function renderAdmin() {
+    const profiles = adminFilteredProfiles();
+    const pending = state.profiles.filter((p) => accessStatus(p) === "pending");
+    const blocked = state.profiles.filter((p) => accessStatus(p) === "blocked" || p.is_active === false);
+    const approved = state.profiles.filter((p) => accessStatus(p) === "approved" && p.is_active !== false);
+    const currentCommander = state.profiles.find((p) => p.rank === "Commandeur suprême");
+    const personalCount = state.vaults.filter((v) => v.kind === "personal").length;
+
+    return `
+      <div class="page-head admin-page-head">
+        <div><h2>Panel administrateur</h2><p>Gestion technique complète, indépendante de ton grade RP.</p></div>
+        <div class="page-actions">
+          <span class="badge badge-green">ADMIN TECHNIQUE</span>
+          <button id="admin-refresh" class="btn btn-secondary" type="button">↻ Actualiser</button>
+        </div>
+      </div>
+
+      <div class="stats-grid admin-stats">
+        <article class="stat-card"><span>Demandes en attente</span><strong>${formatNumber(pending.length)}</strong><small>À valider manuellement</small></article>
+        <article class="stat-card"><span>Membres autorisés</span><strong>${formatNumber(approved.length)}</strong><small>Accès actif</small></article>
+        <article class="stat-card"><span>Comptes bloqués</span><strong>${formatNumber(blocked.length)}</strong><small>Accès aux données coupé</small></article>
+        <article class="stat-card"><span>Connexions enregistrées</span><strong>${formatNumber(state.loginEvents.length)}</strong><small>Journal récent chargé</small></article>
+      </div>
+
+      <section class="card admin-section">
+        <div class="card-head"><div><h3>Demandes d'accès</h3><p>Un inconnu n'accède à aucun coffre tant que tu ne l'autorises pas.</p></div><span class="badge badge-yellow">${pending.length} EN ATTENTE</span></div>
+        <div class="card-body admin-card-body">
+          ${pending.length ? `<div class="admin-request-grid">${pending.map(renderAdminRequestCard).join("")}</div>` : `<div class="empty-state"><div class="empty-icon">✓</div><strong>Aucune demande</strong>Tous les comptes ont été traités.</div>`}
+        </div>
+      </section>
+
+      <section class="card admin-section">
+        <div class="card-head admin-toolbar">
+          <div><h3>Utilisateurs & grades</h3><p>Whitelist, blocage, grades, Discord ID et notes internes.</p></div>
+          <input id="admin-user-search" class="admin-search" value="${esc(state.adminFilter)}" placeholder="Rechercher pseudo, ID Discord, e-mail…" />
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Utilisateur</th><th>Discord / e-mail</th><th>Grade</th><th>Accès</th><th>Connexions</th><th>Actions</th></tr></thead>
+            <tbody>${profiles.map(renderAdminUserRow).join("")}</tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="grid two-col admin-two-col">
+        <section class="card admin-section">
+          <div class="card-head"><div><h3>Commandement</h3><p>Gestion de la hiérarchie principale</p></div></div>
+          <div class="card-body">
+            <div class="notice"><strong>Commandeur suprême actuel</strong><br>${esc(displayName(currentCommander) || "Aucun")}</div>
+            <div class="form-actions admin-left-actions"><button id="admin-set-commander" class="btn btn-danger" type="button">Changer le Commandeur suprême</button></div>
+          </div>
+        </section>
+        <section class="card admin-section">
+          <div class="card-head"><div><h3>Contenu</h3><p>Coffres, objets et historique</p></div></div>
+          <div class="card-body">
+            <div class="admin-mini-stats"><span><strong>${state.vaults.filter(v => v.kind === "shared").length}</strong> coffres communs</span><span><strong>${personalCount}</strong> coffres perso</span><span><strong>${state.items.length}</strong> objets</span></div>
+            <div class="form-actions admin-left-actions"><button class="btn btn-secondary" data-admin-jump="vaults" type="button">Gérer les coffres</button><button class="btn btn-secondary" data-admin-jump="history" type="button">Voir l'historique</button><button id="admin-export-history" class="btn btn-secondary" type="button">Exporter CSV</button></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="card admin-section">
+        <div class="card-head"><div><h3>Gestion rapide des coffres</h3><p>Modifier, archiver/supprimer les coffres depuis le panel.</p></div><button id="admin-create-vault" class="btn btn-primary btn-sm" type="button">+ Nouveau coffre</button></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Coffre</th><th>Type</th><th>Propriétaire</th><th>Stocks liés</th><th>Actions</th></tr></thead>
+          <tbody>${state.vaults.map(renderAdminVaultRow).join("")}</tbody></table>
+        </div>
+      </section>
+
+      <section class="card admin-section">
+        <div class="card-head"><div><h3>Bibliothèque d'objets</h3><p>Modifier ou supprimer définitivement les références globales.</p></div><span class="badge badge-purple">${state.items.length} OBJET(S)</span></div>
+        <div class="table-wrap admin-items-table">
+          <table><thead><tr><th>Objet</th><th>Catégorie</th><th>Unité</th><th>Présent dans</th><th>Actions</th></tr></thead>
+          <tbody>${state.items.map(renderAdminItemRow).join("") || '<tr><td colspan="5">Aucun objet.</td></tr>'}</tbody></table>
+        </div>
+      </section>
+
+      <section class="card admin-section">
+        <div class="card-head"><div><h3>Journal des connexions</h3><p>Informations fournies par Discord/Supabase et le navigateur. Aucun mot de passe ni message privé.</p></div><button id="admin-clean-logins" class="btn btn-secondary btn-sm" type="button">Nettoyer +90 jours</button></div>
+        <div class="table-wrap admin-log-table">
+          <table><thead><tr><th>Date</th><th>Compte</th><th>Discord ID</th><th>E-mail</th><th>Navigateur / appareil</th></tr></thead>
+          <tbody>${state.loginEvents.slice(0, 150).map(renderLoginEventRow).join("") || '<tr><td colspan="5">Aucune connexion enregistrée.</td></tr>'}</tbody></table>
+        </div>
+      </section>
+
+      <div class="grid two-col admin-two-col">
+        <section class="card admin-section">
+          <div class="card-head"><div><h3>Sécurité du site</h3><p>Whitelist et maintenance</p></div></div>
+          <div class="card-body">
+            <form id="admin-site-settings-form">
+              <label class="admin-switch-row"><input name="approval_required" type="checkbox" ${state.siteSettings.approval_required !== false ? "checked" : ""}><span><strong>Validation obligatoire</strong><small>Les nouveaux comptes restent en attente.</small></span></label>
+              <label class="admin-switch-row"><input name="site_enabled" type="checkbox" ${state.siteSettings.site_enabled !== false ? "checked" : ""}><span><strong>Site ouvert aux membres</strong><small>Décoche pour couper l'accès à tous sauf l'admin.</small></span></label>
+              <div class="field" style="margin-top:12px"><label>Message de maintenance</label><textarea name="maintenance_message" maxlength="300" placeholder="Maintenance en cours…">${esc(state.siteSettings.maintenance_message || "")}</textarea></div>
+              <div class="form-actions"><button class="btn btn-primary" type="submit">Enregistrer</button></div>
+            </form>
+          </div>
+        </section>
+        <section class="card admin-section">
+          <div class="card-head"><div><h3>Administration technique</h3><p>Mot de passe et propriétaire du panel</p></div></div>
+          <div class="card-body">
+            <div class="notice notice-danger"><strong>Ton grade RP reste ${esc(state.profile.rank)}</strong><br>Ces droits sont techniques et séparés de la hiérarchie RP.</div>
+            <div class="form-actions admin-left-actions"><button id="admin-change-password" class="btn btn-secondary" type="button">Changer le mot de passe admin</button><button id="admin-transfer-owner" class="btn btn-danger" type="button">Transférer le panel admin</button></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="card admin-section">
+        <div class="card-head"><div><h3>Audit administrateur</h3><p>Traçabilité des modifications sensibles.</p></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Action</th><th>Cible</th><th>Détails</th></tr></thead><tbody>${state.adminAudit.slice(0, 150).map(renderAdminAuditRow).join("") || '<tr><td colspan="4">Aucune action enregistrée.</td></tr>'}</tbody></table></div>
+      </section>
+    `;
+  }
+
+  function renderAdminRequestCard(profile) {
+    const priv = adminPrivateFor(profile.id);
+    const last = latestLoginFor(profile.id);
+    return `
+      <article class="admin-request-card">
+        <div class="admin-request-user">${avatar(profile)}<div><strong>${esc(displayName(profile))}</strong><span>${esc(profile.username || "")}</span></div></div>
+        <dl class="admin-detail-list">
+          <div><dt>Discord ID</dt><dd>${esc(profile.discord_id || "Non fourni")}</dd></div>
+          <div><dt>E-mail</dt><dd>${esc(priv?.email || "Non fourni")}</dd></div>
+          <div><dt>Première connexion</dt><dd>${formatDate(profile.first_login_at || profile.created_at)}</dd></div>
+          <div><dt>Navigateur</dt><dd class="truncate-text">${esc(last?.user_agent || "Non enregistré")}</dd></div>
+        </dl>
+        <div class="admin-request-actions"><button class="btn btn-primary btn-sm" data-admin-approve="${profile.id}" type="button">✓ Autoriser</button><button class="btn btn-danger btn-sm" data-admin-block="${profile.id}" type="button">Bloquer</button><button class="btn btn-secondary btn-sm" data-admin-manage="${profile.id}" type="button">Détails</button></div>
+      </article>`;
+  }
+
+  function renderAdminUserRow(profile) {
+    const priv = adminPrivateFor(profile.id);
+    return `
+      <tr>
+        <td><div class="item-cell">${avatar(profile, "item-thumb")}<div><strong>${esc(displayName(profile))}</strong><span>${esc(profile.username || "")}</span></div></div></td>
+        <td><strong class="mono-small">${esc(profile.discord_id || "—")}</strong><br><span class="muted-small">${esc(priv?.email || "E-mail non fourni")}</span></td>
+        <td><span class="badge badge-purple">${esc(profile.rank)}</span></td>
+        <td>${accessBadge(profile)}</td>
+        <td><strong>${formatNumber(profile.login_count || 0)}</strong><br><span class="muted-small">${relativeDate(profile.last_login_at || profile.last_seen_at)}</span></td>
+        <td><div class="row-actions"><button class="btn btn-secondary btn-sm" data-admin-manage="${profile.id}" type="button">Gérer</button>${accessStatus(profile) !== "approved" ? `<button class="btn btn-primary btn-sm" data-admin-approve="${profile.id}" type="button">Autoriser</button>` : ""}${profile.id !== state.user.id && accessStatus(profile) !== "blocked" ? `<button class="btn btn-danger btn-sm" data-admin-block="${profile.id}" type="button">Bloquer</button>` : ""}</div></td>
+      </tr>`;
+  }
+
+  function renderAdminVaultRow(vault) {
+    const owner = byId(state.profiles, vault.owner_id);
+    const stockCount = state.inventory.filter((row) => row.vault_id === vault.id).length;
+    return `<tr><td><strong>${esc(vault.name)}</strong><br><span class="muted-small">${esc(vault.description || "")}</span></td><td><span class="badge ${vault.kind === "personal" ? "badge-purple" : "badge-green"}">${vault.kind === "personal" ? "Personnel" : "Commun"}</span></td><td>${vault.kind === "personal" ? esc(displayName(owner)) : "Organisation"}</td><td>${stockCount} référence(s)</td><td><div class="row-actions"><button class="btn btn-secondary btn-sm" data-edit-vault="${vault.id}" type="button">Modifier</button><button class="btn btn-danger btn-sm" data-admin-delete-vault="${vault.id}" type="button">Supprimer</button></div></td></tr>`;
+  }
+
+  function renderAdminItemRow(item) {
+    const linked = state.inventory.filter((row) => row.item_id === item.id);
+    const vaultNames = linked.slice(0, 3).map((row) => byId(state.vaults, row.vault_id)?.name).filter(Boolean);
+    const more = Math.max(0, linked.length - vaultNames.length);
+    return `<tr><td><div class="item-cell">${itemImage(item, "item-thumb")}<div><strong>${esc(item.name)}</strong><span>${esc(item.description || "")}</span></div></div></td><td>${esc(item.category)}</td><td>${esc(item.unit)}</td><td><span class="muted-small">${esc(vaultNames.join(", ") || "Aucun coffre")}${more ? ` +${more}` : ""}</span></td><td><div class="row-actions"><button class="btn btn-secondary btn-sm" data-edit-item="${item.id}" type="button">Modifier</button><button class="btn btn-danger btn-sm" data-delete-item="${item.id}" type="button">Supprimer</button></div></td></tr>`;
+  }
+
+  function renderLoginEventRow(event) {
+    const profile = byId(state.profiles, event.user_id);
+    const priv = adminPrivateFor(event.user_id);
+    return `<tr><td>${formatDate(event.logged_at)}</td><td>${esc(displayName(profile))}</td><td class="mono-small">${esc(profile?.discord_id || "—")}</td><td>${esc(priv?.email || "—")}</td><td class="ua-cell" title="${esc(event.user_agent || "")}">${esc(event.user_agent || "—")}</td></tr>`;
+  }
+
+  function renderAdminAuditRow(row) {
+    const target = byId(state.profiles, row.target_user_id || row.new_commander_id || row.previous_commander_id);
+    let details = "—";
+    if (row.details && typeof row.details === "object") {
+      details = Object.entries(row.details).map(([k, v]) => `${k}: ${v}`).join(" · ") || "—";
+    }
+    return `<tr><td>${formatDate(row.created_at)}</td><td>${esc(adminAuditLabel(row))}</td><td>${esc(displayName(target) || "—")}</td><td class="muted-small">${esc(details)}</td></tr>`;
+  }
+
+  function openAdminManageMemberModal(profileId) {
+    const profile = byId(state.profiles, profileId);
+    if (!profile) return;
+    const priv = adminPrivateFor(profile.id);
+    const last = latestLoginFor(profile.id);
+    const rankOptions = RANKS.filter((rank) => rank !== "Commandeur suprême");
+    openModal("Gérer le compte", `
+      <div class="admin-profile-head">${avatar(profile, "admin-profile-avatar")}<div><h3>${esc(displayName(profile))}</h3><p>${esc(profile.username || "")}</p>${accessBadge(profile)}</div></div>
+      <div class="admin-info-grid">
+        <div><span>Discord ID</span><strong>${esc(profile.discord_id || "—")}</strong></div>
+        <div><span>E-mail</span><strong>${esc(priv?.email || "Non fourni")}</strong></div>
+        <div><span>Première connexion</span><strong>${formatDate(profile.first_login_at || profile.created_at)}</strong></div>
+        <div><span>Dernière connexion</span><strong>${formatDate(profile.last_login_at || profile.last_seen_at)}</strong></div>
+        <div><span>Nombre de connexions</span><strong>${formatNumber(profile.login_count || 0)}</strong></div>
+        <div><span>Navigateur</span><strong class="truncate-text">${esc(last?.user_agent || "Non enregistré")}</strong></div>
+      </div>
+      <form id="admin-manage-user-form" style="margin-top:16px">
+        <div class="form-grid">
+          <div class="field"><label>Grade RP</label><select name="rank">${rankOptions.map((rank) => `<option value="${esc(rank)}" ${profile.rank === rank ? "selected" : ""}>${esc(rank)}</option>`).join("")}</select></div>
+          <div class="field"><label>Accès au site</label><select name="status"><option value="approved" ${accessStatus(profile) === "approved" ? "selected" : ""}>Autorisé</option><option value="pending" ${accessStatus(profile) === "pending" ? "selected" : ""}>En attente</option><option value="blocked" ${accessStatus(profile) === "blocked" ? "selected" : ""}>Bloqué</option></select></div>
+          <div class="field full"><label>Note administrateur (privée)</label><textarea name="note" maxlength="500" placeholder="Ex. Membre validé par…">${esc(profile.admin_note || "")}</textarea></div>
+        </div>
+        <div class="notice" style="margin-top:12px">Pour attribuer <strong>Commandeur suprême</strong>, utilise le bouton dédié dans la section Commandement.</div>
+        <div class="form-actions"><button class="btn btn-secondary" data-close="1" type="button">Annuler</button><button class="btn btn-primary" type="submit">Enregistrer</button></div>
+      </form>
+    `, true);
+
+    document.getElementById("admin-manage-user-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      await runAction("Mise à jour du compte…", async () => {
+        const rank = String(data.get("rank"));
+        const status = String(data.get("status"));
+        const note = String(data.get("note") || "");
+        if (profile.rank !== "Commandeur suprême" && rank !== profile.rank) {
+          const rankResult = await state.client.rpc("admin_set_member_rank", { p_user_id: profile.id, p_rank: rank });
+          if (rankResult.error) throw rankResult.error;
+        }
+        const statusResult = await state.client.rpc("admin_set_user_status", { p_user_id: profile.id, p_status: status, p_note: note });
+        if (statusResult.error) throw statusResult.error;
+        const noteResult = await state.client.rpc("admin_update_member_note", { p_user_id: profile.id, p_note: note });
+        if (noteResult.error) throw noteResult.error;
+      }, "Compte mis à jour");
+    });
+  }
+
+  async function adminQuickStatus(userId, status) {
+    await runAction(status === "approved" ? "Autorisation du compte…" : "Blocage du compte…", async () => {
+      const { error } = await state.client.rpc("admin_set_user_status", { p_user_id: userId, p_status: status, p_note: null });
+      if (error) throw error;
+    }, status === "approved" ? "Compte autorisé" : "Compte bloqué");
+  }
+
+  function openDeleteVaultModal(vaultId) {
+    const vault = byId(state.vaults, vaultId);
+    if (!vault) return;
+    openModal("Supprimer le coffre", `
+      <div class="notice notice-danger"><strong>Suppression définitive.</strong><br>Le coffre, ses stocks liés et ses mouvements associés seront supprimés.</div>
+      <form id="admin-delete-vault-form" style="margin-top:14px"><div class="field"><label>Écris exactement : ${esc(vault.name)}</label><input name="confirm" autocomplete="off" required></div><div class="form-actions"><button class="btn btn-secondary" data-close="1" type="button">Annuler</button><button class="btn btn-danger" type="submit">Supprimer définitivement</button></div></form>
+    `);
+    document.getElementById("admin-delete-vault-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      if (String(data.get("confirm")) !== vault.name) return toast("Confirmation incorrecte", "Le nom saisi ne correspond pas.", "warning");
+      await runAction("Suppression du coffre…", async () => {
+        const { error } = await state.client.from("vaults").delete().eq("id", vault.id);
+        if (error) throw error;
+      }, "Coffre supprimé");
+    });
+  }
+
+  function openAdminPasswordModal() {
+    openModal("Changer le mot de passe administrateur", `
+      <form id="admin-password-form"><div class="form-grid"><div class="field full"><label>Mot de passe actuel</label><input name="old_password" type="password" minlength="10" required></div><div class="field full"><label>Nouveau mot de passe</label><input name="new_password" type="password" minlength="10" required></div><div class="field full"><label>Confirme le nouveau mot de passe</label><input name="confirm_password" type="password" minlength="10" required></div></div><div class="form-actions"><button class="btn btn-secondary" data-close="1" type="button">Annuler</button><button class="btn btn-primary" type="submit">Modifier</button></div></form>
+    `);
+    document.getElementById("admin-password-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      if (data.get("new_password") !== data.get("confirm_password")) return toast("Mot de passe", "Les deux nouveaux mots de passe ne correspondent pas.", "warning");
+      await runAction("Modification du mot de passe…", async () => {
+        const { error } = await state.client.rpc("admin_change_password", { p_old_password: data.get("old_password"), p_new_password: data.get("new_password") });
+        if (error) throw error;
+      }, "Mot de passe administrateur modifié");
+    });
+  }
+
+  function openAdminTransferModal() {
+    const candidates = state.profiles.filter((p) => p.id !== state.user.id);
+    openModal("Transférer le panel administrateur", `
+      <div class="notice notice-danger"><strong>Attention.</strong><br>Après le transfert et le rechargement, ton compte perdra les droits administrateur technique.</div>
+      <form id="admin-transfer-form" style="margin-top:14px"><div class="form-grid"><div class="field full"><label>Nouveau propriétaire technique</label><select name="user_id" required><option value="">Choisir un membre</option>${candidates.map((p) => `<option value="${p.id}">${esc(displayName(p))} — ${esc(p.rank)}</option>`).join("")}</select></div><div class="field full"><label>Mot de passe admin</label><input name="password" type="password" minlength="10" required></div></div><div class="form-actions"><button class="btn btn-secondary" data-close="1" type="button">Annuler</button><button class="btn btn-danger" type="submit">Transférer</button></div></form>
+    `, true);
+    document.getElementById("admin-transfer-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      await runAction("Transfert de l'administration…", async () => {
+        const { error } = await state.client.rpc("admin_transfer_owner", { p_password: data.get("password"), p_new_owner: data.get("user_id") });
+        if (error) throw error;
+      }, "Administration transférée");
+    });
+  }
+
+  function openAdminCommanderModal() {
+    openAdminPanelModal();
   }
 
   function openAdminClaimModal() {
@@ -991,7 +1410,12 @@
 
     document.getElementById("create-shared-vault")?.addEventListener("click", openCreateVaultModal);
     document.getElementById("create-personal-vault")?.addEventListener("click", createPersonalVault);
-    document.getElementById("open-admin-panel")?.addEventListener("click", openAdminPanelModal);
+    document.getElementById("open-admin-panel")?.addEventListener("click", () => {
+      if (!isTechnicalAdmin()) return openAdminClaimModal();
+      state.page = "admin";
+      state.selectedVaultId = null;
+      renderApp();
+    });
     document.getElementById("claim-admin-access")?.addEventListener("click", openAdminClaimModal);
     document.getElementById("add-item")?.addEventListener("click", openAddItemModal);
 
@@ -1009,6 +1433,57 @@
 
     document.querySelectorAll("[data-edit-member]").forEach((button) => {
       button.addEventListener("click", () => openEditMemberModal(button.dataset.editMember));
+    });
+
+    document.getElementById("admin-refresh")?.addEventListener("click", loadData);
+    document.getElementById("admin-create-vault")?.addEventListener("click", openCreateVaultModal);
+    document.getElementById("admin-set-commander")?.addEventListener("click", openAdminCommanderModal);
+    document.getElementById("admin-export-history")?.addEventListener("click", exportHistoryCsv);
+    document.getElementById("admin-change-password")?.addEventListener("click", openAdminPasswordModal);
+    document.getElementById("admin-transfer-owner")?.addEventListener("click", openAdminTransferModal);
+
+    document.querySelectorAll("[data-admin-jump]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.page = button.dataset.adminJump;
+        state.selectedVaultId = null;
+        renderApp();
+      });
+    });
+
+    document.querySelectorAll("[data-admin-approve]").forEach((button) => button.addEventListener("click", () => adminQuickStatus(button.dataset.adminApprove, "approved")));
+    document.querySelectorAll("[data-admin-block]").forEach((button) => button.addEventListener("click", () => adminQuickStatus(button.dataset.adminBlock, "blocked")));
+    document.querySelectorAll("[data-admin-manage]").forEach((button) => button.addEventListener("click", () => openAdminManageMemberModal(button.dataset.adminManage)));
+    document.querySelectorAll("[data-admin-delete-vault]").forEach((button) => button.addEventListener("click", () => openDeleteVaultModal(button.dataset.adminDeleteVault)));
+
+    document.getElementById("admin-user-search")?.addEventListener("input", (event) => {
+      state.adminFilter = event.target.value;
+      const content = document.getElementById("page-content");
+      content.innerHTML = renderAdmin();
+      bindPageEvents();
+      const search = document.getElementById("admin-user-search");
+      search?.focus();
+      search?.setSelectionRange(search.value.length, search.value.length);
+    });
+
+    document.getElementById("admin-site-settings-form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      await runAction("Enregistrement des paramètres…", async () => {
+        const { error } = await state.client.rpc("admin_update_site_settings", {
+          p_approval_required: data.get("approval_required") === "on",
+          p_site_enabled: data.get("site_enabled") === "on",
+          p_maintenance_message: data.get("maintenance_message") || null
+        });
+        if (error) throw error;
+      }, "Paramètres enregistrés");
+    });
+
+    document.getElementById("admin-clean-logins")?.addEventListener("click", async () => {
+      if (!confirm("Supprimer les journaux de connexion datant de plus de 90 jours ?")) return;
+      await runAction("Nettoyage du journal…", async () => {
+        const { error } = await state.client.rpc("admin_clear_connection_logs", { p_older_than_days: 90 });
+        if (error) throw error;
+      }, "Anciennes connexions supprimées");
     });
 
     const historyInputs = ["history-search", "history-type", "history-vault", "history-member"];
@@ -1391,6 +1866,9 @@
       } else if (event === "SIGNED_OUT") {
         state.profile = null;
         state.adminAccess = false;
+        state.adminPrivate = [];
+        state.loginEvents = [];
+        state.adminAudit = [];
         renderAuth();
       }
     });
