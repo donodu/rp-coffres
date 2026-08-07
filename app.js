@@ -49,6 +49,7 @@
     inventory: [],
     movements: [],
     profiles: [],
+    adminAccess: false,
     historyFilters: { search: "", type: "", vault: "", member: "" }
   };
 
@@ -76,21 +77,26 @@
     return RANK_LEVELS[rank] || 0;
   }
 
+  function isTechnicalAdmin() {
+    return state.adminAccess === true;
+  }
+
   function isTopThree() {
-    return level() >= 100;
+    return isTechnicalAdmin() || level() >= 100;
   }
 
   function isCommanderSupreme() {
-    return level() === 120;
+    return isTechnicalAdmin() || level() === 120;
   }
 
   function canMove(vault) {
     if (!vault) return false;
-    return vault.kind === "personal" ? isTopThree() : level() >= 20;
+    if (isTechnicalAdmin()) return true;
+    return vault.kind === "personal" ? level() >= 100 : level() >= 20;
   }
 
   function canManage() {
-    return isTopThree();
+    return isTechnicalAdmin() || level() >= 100;
   }
 
   function formatNumber(value) {
@@ -266,6 +272,7 @@
     state.session = null;
     state.user = null;
     state.profile = null;
+    state.adminAccess = false;
     renderAuth();
   }
 
@@ -306,7 +313,15 @@
         throw new Error("Ton profil n'a pas été créé. Déconnecte-toi puis reconnecte-toi.");
       }
 
-      const topThree = level(state.profile.rank) >= 100;
+      const adminResult = await state.client.rpc("is_site_admin");
+      if (adminResult.error) {
+        console.warn("Statut admin indisponible :", adminResult.error);
+        state.adminAccess = false;
+      } else {
+        state.adminAccess = adminResult.data === true;
+      }
+
+      const topThree = isTopThree();
 
       const queries = [
         state.client.from("vaults").select("*").eq("is_archived", false).order("created_at"),
@@ -415,7 +430,7 @@
           <div class="sidebar-user">
             <div class="user-line">
               ${avatar(state.profile)}
-              <div><strong>${esc(displayName(state.profile))}</strong><span>${esc(state.profile.rank)}</span></div>
+              <div><strong>${esc(displayName(state.profile))}</strong><span>${esc(state.profile.rank)}${isTechnicalAdmin() ? " · ADMIN TECHNIQUE" : ""}</span></div>
             </div>
             <button id="logout" class="btn btn-secondary btn-block btn-sm" type="button">Déconnexion</button>
           </div>
@@ -428,6 +443,7 @@
               <div><h1>${esc(meta.title)}</h1><p>${esc(meta.subtitle)}</p></div>
             </div>
             <div class="topbar-actions">
+              ${isTechnicalAdmin() ? '<span class="rank-chip">ADMIN TECHNIQUE</span>' : ""}
               <span class="rank-chip">${esc(state.profile.rank)}</span>
               <button id="refresh" class="btn btn-secondary btn-sm" type="button">↻ <span>Actualiser</span></button>
             </div>
@@ -480,7 +496,7 @@
         <div class="empty-state">
           <div class="empty-icon">⌁</div>
           <strong>Accès réservé</strong>
-          Cette section est visible uniquement par le Commandeur suprême, le Maître de guerre et les Chefs mercenaires.
+          Cette section est visible uniquement par les trois plus hauts grades et par l’administrateur technique.
         </div>
       </div>
     `;
@@ -785,7 +801,7 @@
   }
 
   function renderMemberRow(profile) {
-    const editable = isTopThree() && profile.id !== state.user.id && level(profile.rank) <= level();
+    const editable = canManage() && (isTechnicalAdmin() || (profile.id !== state.user.id && level(profile.rank) <= level()));
     return `
       <tr>
         <td><div class="item-cell">${avatar(profile, "item-thumb")}<div><strong>${esc(displayName(profile))}</strong><span>${esc(profile.username || "")}</span></div></div></td>
@@ -808,7 +824,7 @@
             <div class="notice" style="margin-top:14px">
               <strong>Permissions actuelles</strong><br>
               ${level() >= 20 ? "Dépôts et retraits autorisés dans les coffres communs." : "Consultation uniquement dans les coffres communs."}<br>
-              ${isTopThree() ? "Historique, coffres personnels et administration accessibles." : "Historique et coffres personnels masqués."}
+              ${isTechnicalAdmin() ? "Accès administrateur total : mêmes droits fonctionnels que le Commandeur suprême, sans modifier ton grade RP." : (isTopThree() ? "Historique, coffres personnels et administration accessibles." : "Historique et coffres personnels masqués.")}
             </div>
           </div>
         </section>
@@ -835,6 +851,13 @@
               <strong>Administration indépendante du grade RP</strong><br>
               Le premier compte qui saisit le bon mot de passe devient le propriétaire technique du panel. Ensuite, seul ce compte peut utiliser le mot de passe pour nommer le Commandeur suprême.
             </div>
+            <div class="notice ${isTechnicalAdmin() ? "notice-success" : "notice-warning"}" style="margin-top:10px">
+              <strong>Droits administrateur :</strong><br>
+              ${isTechnicalAdmin() ? "ACTIFS — tu as tous les droits du Commandeur suprême sur le site, mais ton grade RP reste " + esc(state.profile.rank) + "." : "INACTIFS — active-les avec le mot de passe administrateur."}
+            </div>
+            <div class="form-actions" style="justify-content:flex-start;margin-top:10px">
+              ${isTechnicalAdmin() ? '<span class="badge badge-green">ADMIN TECHNIQUE ACTIF</span>' : '<button id="claim-admin-access" class="btn btn-secondary" type="button">Activer mes droits administrateur</button>'}
+            </div>
             <div class="notice" style="margin-top:10px">
               <strong>Commandeur suprême actuel :</strong><br>
               ${esc(displayName(state.profiles.find((profile) => profile.rank === "Commandeur suprême")) || "Aucun membre nommé")}
@@ -846,6 +869,38 @@
         </section>
       </div>
     `;
+  }
+
+  function openAdminClaimModal() {
+    openModal("Activer les droits administrateur", `
+      <div class="notice notice-warning">
+        <strong>Administration technique indépendante du RP.</strong><br>
+        Une fois activée, ton compte conserve son vrai grade RP mais peut gérer tout le site comme un Commandeur suprême.
+      </div>
+      <form id="admin-claim-form" style="margin-top:14px">
+        <div class="field">
+          <label>Mot de passe administrateur</label>
+          <input name="password" type="password" minlength="10" autocomplete="current-password" required />
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-secondary" data-close="1" type="button">Annuler</button>
+          <button class="btn btn-primary" type="submit">Activer mes droits</button>
+        </div>
+      </form>
+    `);
+
+    document.getElementById("admin-claim-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      const password = String(data.get("password") || "");
+      await runAction("Activation des droits administrateur…", async () => {
+        const { data: result, error } = await state.client.rpc("admin_claim_access", {
+          p_password: password
+        });
+        if (error) throw error;
+        if (!result?.success) throw new Error(result?.message || "Activation impossible.");
+      }, "Droits administrateur activés");
+    });
   }
 
   function openAdminPanelModal() {
@@ -937,6 +992,7 @@
     document.getElementById("create-shared-vault")?.addEventListener("click", openCreateVaultModal);
     document.getElementById("create-personal-vault")?.addEventListener("click", createPersonalVault);
     document.getElementById("open-admin-panel")?.addEventListener("click", openAdminPanelModal);
+    document.getElementById("claim-admin-access")?.addEventListener("click", openAdminClaimModal);
     document.getElementById("add-item")?.addEventListener("click", openAddItemModal);
 
     document.querySelectorAll("[data-move]").forEach((button) => {
@@ -1211,7 +1267,7 @@
   function openEditMemberModal(profileId) {
     const profile = byId(state.profiles, profileId);
     if (!profile) return;
-    const allowedRanks = RANKS.filter((rank) => level(rank) <= level());
+    const allowedRanks = RANKS.filter((rank) => rank !== "Commandeur suprême" && (isTechnicalAdmin() || level(rank) <= level()));
     openModal("Modifier le membre", `
       <form id="member-form">
         <div class="item-cell" style="margin-bottom:15px">${avatar(profile, "item-thumb")}<div><strong>${esc(displayName(profile))}</strong><span>${esc(profile.username || "")}</span></div></div>
@@ -1219,7 +1275,7 @@
           <div class="field full"><label>Grade</label><select name="rank">${allowedRanks.map((rank) => `<option value="${esc(rank)}" ${profile.rank === rank ? "selected" : ""}>${esc(rank)}</option>`).join("")}</select></div>
           <div class="field full"><label>Accès au site</label><select name="active"><option value="true" ${profile.is_active ? "selected" : ""}>Actif</option><option value="false" ${!profile.is_active ? "selected" : ""}>Suspendu</option></select></div>
         </div>
-        <div class="notice" style="margin-top:13px">Tu ne peux pas attribuer un grade supérieur au tien ni modifier ton propre grade depuis le site.</div>
+        <div class="notice" style="margin-top:13px">${isTechnicalAdmin() ? "En tant qu’admin technique, tu peux attribuer tous les grades sauf Commandeur suprême (utilise le panel administrateur pour ce grade)." : "Tu ne peux pas attribuer un grade supérieur au tien ni modifier ton propre grade depuis le site."}</div>
         <div class="form-actions"><button class="btn btn-secondary" data-close="1" type="button">Annuler</button><button class="btn btn-primary" type="submit">Enregistrer</button></div>
       </form>
     `);
@@ -1334,6 +1390,7 @@
         window.setTimeout(() => loadData(authenticatedUser), 0);
       } else if (event === "SIGNED_OUT") {
         state.profile = null;
+        state.adminAccess = false;
         renderAuth();
       }
     });
