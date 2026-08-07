@@ -825,8 +825,86 @@
             </div>
           </div>
         </section>
+        <section class="card" style="grid-column:1/-1">
+          <div class="card-head">
+            <div><h3>Panel administrateur protégé</h3><p>Nommer ou remplacer le Commandeur suprême</p></div>
+            <span class="badge badge-red">Mot de passe requis</span>
+          </div>
+          <div class="card-body">
+            <div class="notice notice-danger">
+              <strong>Administration indépendante du grade RP</strong><br>
+              Le premier compte qui saisit le bon mot de passe devient le propriétaire technique du panel. Ensuite, seul ce compte peut utiliser le mot de passe pour nommer le Commandeur suprême.
+            </div>
+            <div class="notice" style="margin-top:10px">
+              <strong>Commandeur suprême actuel :</strong><br>
+              ${esc(displayName(state.profiles.find((profile) => profile.rank === "Commandeur suprême")) || "Aucun membre nommé")}
+            </div>
+            <div class="form-actions" style="justify-content:flex-start">
+              <button id="open-admin-panel" class="btn btn-primary" type="button">Ouvrir le panel administrateur</button>
+            </div>
+          </div>
+        </section>
       </div>
     `;
+  }
+
+  function openAdminPanelModal() {
+    const activeProfiles = state.profiles
+      .filter((profile) => profile.is_active)
+      .sort((a, b) => displayName(a).localeCompare(displayName(b), "fr"));
+    const currentCommander = state.profiles.find((profile) => profile.rank === "Commandeur suprême");
+
+    openModal("Panel administrateur", `
+      <div class="notice notice-danger">
+        <strong>Action sensible :</strong> le membre choisi deviendra Commandeur suprême. L'ancien Commandeur suprême, s'il existe, deviendra Maître de guerre.
+      </div>
+      <div class="notice" style="margin-top:10px">
+        <strong>Commandeur actuel :</strong> ${esc(displayName(currentCommander) || "Aucun")}
+      </div>
+      <form id="admin-commander-form" style="margin-top:14px">
+        <div class="form-grid">
+          <div class="field full">
+            <label>Nouveau Commandeur suprême</label>
+            <select name="user_id" required>
+              <option value="">Choisir un membre</option>
+              ${activeProfiles.map((profile) => `<option value="${profile.id}" ${profile.id === currentCommander?.id ? "selected" : ""}>${esc(displayName(profile))} — ${esc(profile.rank)}</option>`).join("")}
+            </select>
+          </div>
+          <div class="field full">
+            <label>Mot de passe administrateur</label>
+            <input name="password" type="password" minlength="10" autocomplete="current-password" required />
+          </div>
+          <label class="field full" style="display:flex;grid-template-columns:auto 1fr;align-items:flex-start;gap:9px">
+            <input name="confirm" type="checkbox" required style="width:auto;margin-top:3px" />
+            <span>Je confirme vouloir transférer le grade Commandeur suprême à ce membre.</span>
+          </label>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-secondary" data-close="1" type="button">Annuler</button>
+          <button class="btn btn-danger" type="submit">Nommer le Commandeur suprême</button>
+        </div>
+      </form>
+    `, true);
+
+    document.getElementById("admin-commander-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      const userId = String(data.get("user_id") || "");
+      const password = String(data.get("password") || "");
+      if (!userId) {
+        toast("Membre requis", "Choisis le nouveau Commandeur suprême.", "warning");
+        return;
+      }
+
+      await runAction("Transfert du commandement…", async () => {
+        const { data: result, error } = await state.client.rpc("admin_set_commander", {
+          p_password: password,
+          p_new_commander: userId
+        });
+        if (error) throw error;
+        if (!result?.success) throw new Error(result?.message || "Le transfert a échoué.");
+      }, "Commandeur suprême mis à jour");
+    });
   }
 
   function bindPageEvents() {
@@ -858,6 +936,7 @@
 
     document.getElementById("create-shared-vault")?.addEventListener("click", openCreateVaultModal);
     document.getElementById("create-personal-vault")?.addEventListener("click", createPersonalVault);
+    document.getElementById("open-admin-panel")?.addEventListener("click", openAdminPanelModal);
     document.getElementById("add-item")?.addEventListener("click", openAddItemModal);
 
     document.querySelectorAll("[data-move]").forEach((button) => {
