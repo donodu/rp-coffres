@@ -1,0 +1,82 @@
+SILVER PHOENIX — REPARTIR DE ZÉRO
+=================================
+
+CE DOSSIER EST COMPLET
+----------------------
+Il contient le site GitHub Pages, le logo et le script Supabase complet.
+
+RÈGLES DÉJÀ PRÉVUES
+-------------------
+- Tous les nouveaux comptes commencent en Recrue.
+- Aucun compte ne devient automatiquement Commandeur suprême.
+- Mercenaire débutant et tous les grades supérieurs peuvent déposer et retirer.
+- Recrue peut seulement consulter les coffres communs.
+- Seuls les 3 plus hauts grades voient l'historique :
+  1. Commandeur suprême
+  2. Maître de guerre
+  3. Chef mercenaire
+- Seuls ces 3 grades voient la section Coffres personnels.
+- Les 3 hauts grades peuvent gérer coffres, objets et images.
+- Seul le Commandeur suprême peut supprimer définitivement un objet.
+
+ÉTAPE 1 — SUPABASE
+------------------
+1. Ouvre ton projet Supabase.
+2. Va dans SQL Editor > New query.
+3. Ouvre 00_INSTALLATION_COMPLETE_SUPABASE.sql avec le Bloc-notes.
+4. Fais Ctrl+A puis Ctrl+C.
+5. Colle tout dans Supabase.
+6. Clique sur Run.
+7. Le résultat attendu est : Success. No rows returned.
+
+ÉTAPE 2 — CLÉ PUBLIQUE
+----------------------
+1. Supabase > Project Settings > API Keys.
+2. Copie uniquement la clé Publishable ou anon/public.
+3. Ouvre config.js avec le Bloc-notes.
+4. Remplace COLLE_TA_CLE_PUBLIQUE_SUPABASE_ICI par la clé.
+5. Enregistre.
+
+Ne mets jamais une clé secret, service_role, le Client Secret Discord ou le token du bot.
+
+Le Project URL déjà inscrit dans config.js est :
+https://takthdfraipiztzoyxds.supabase.co
+
+Si tu as supprimé et recréé le projet Supabase, remplace aussi cette URL par la nouvelle.
+
+ÉTAPE 3 — GITHUB
+----------------
+1. Crée un dépôt public, par exemple rp-coffres.
+2. Clique Add file > Upload files.
+3. Glisse TOUS les fichiers de ce dossier, ainsi que le dossier assets.
+4. Vérifie que index.html est directement à la racine du dépôt.
+5. Clique Commit changes.
+6. Settings > Pages.
+7. Source : Deploy from a branch.
+8. Branch : main ; dossier : /(root).
+9. Clique Save et attends 1 à 3 minutes.
+
+ÉTAPE 4 — URLS DE CONNEXION
+---------------------------
+Dans Supabase > Authentication > URL Configuration :
+
+Site URL :
+https://donodu.github.io/rp-coffres/
+
+Redirect URLs :
+https://donodu.github.io/rp-coffres/
+https://donodu.github.io/rp-coffres/**
+
+Dans Discord Developer Portal > OAuth2 > General :
+utilise EXACTEMENT le Callback URL affiché dans
+Supabase > Authentication > Providers > Discord.
+Il doit finir par /auth/v1/callback.
+
+ÉTAPE 5 — NOMMER LE VRAI CHEF
+-----------------------------
+1. Le vrai chef se connecte une première fois au site.
+2. Ouvre 01_ATTRIBUER_LES_GRADES.sql.
+3. Exécute le SELECT pour voir les pseudos.
+4. Adapte l'UPDATE pour attribuer Commandeur suprême au vrai chef.
+
+Le créateur technique du site reste Recrue tant qu'un grade ne lui est pas attribué.
